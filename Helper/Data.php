@@ -210,6 +210,7 @@ class Data extends \Magento\Framework\App\Helper\AbstractHelper
     protected $_serializer;
 
     private $customerAtt    = null;
+    private $addressAtt     = null;
     private $_mapFields     = null;
 
     /**
@@ -346,6 +347,17 @@ class Data extends \Magento\Framework\App\Helper\AbstractHelper
         $this->_api->setUserAgent('Mailchimp4Magento' . (string)$this->getModuleVersion());
         return $this->_api;
     }
+    private function getBindableAttributes()
+    {
+        $systemAtt = $this->getCustomerAtts();
+        $extraAtt = $this->getAddressAtt();
+
+        // Note: We cannot use array_merge here because we need to hold
+        // numeric indexes as they are
+        $ret = $systemAtt + $extraAtt;
+
+        return $ret;
+    }
     private function getCustomerAtts()
     {
         $ret = [];
@@ -380,6 +392,35 @@ class Data extends \Magento\Framework\App\Helper\AbstractHelper
         }
         return $this->customerAtt;
     }
+    private function getAddressAtt()
+    {
+        $ret = [];
+        if (!$this->addressAtt) {
+            $elements = [
+                'default_shipping##zip',
+                'default_shipping##country',
+                'default_shipping##city',
+                'default_shipping##state',
+                'default_billing##zip',
+                'default_billing##country',
+                'default_billing##city',
+                'default_billing##state'
+            ];
+
+            foreach($elements as $item) {
+                $ret[$item] = [
+                    'attCode'   => $item,
+                    'isDate'    => false,
+                    'isAddress' => false,
+                    'options'   => []
+                ];
+            }
+
+            $this->addressAtt = $ret;
+        }
+
+        return $this->addressAtt;
+    }
     public function resetMapFields()
     {
         $this->_mapFields = null;
@@ -387,7 +428,7 @@ class Data extends \Magento\Framework\App\Helper\AbstractHelper
     public function getMapFields($storeId = null)
     {
         if (!$this->_mapFields) {
-            $customerAtt = $this->getCustomerAtts();
+            $customerAtt = $this->getBindableAttributes();
             $data = $this->getConfigValue(self::XML_MERGEVARS, $storeId);
             try {
                 $data = $this->unserialize($data);
@@ -638,28 +679,45 @@ class Data extends \Magento\Framework\App\Helper\AbstractHelper
         $mapFields = $this->getMapFields($storeId);
         if (is_array($mapFields)) {
             foreach ($mapFields as $map) {
-                $value = $customer->getData($map['customer_field']);
-                if ($value) {
-                    if ($map['isDate']) {
-                        $format = $this->getDateFormat();
-                        if ($map['customer_field'] == 'dob') {
-                            $format = substr($format, 0, 3);
+                if (strpos($map['customer_field'], '##') !== false) {
+                    $parts = explode('##', $map['customer_field']);
+                    $attributeCode = $parts[0];
+                    $fieldName = $parts[1];
+                    $customerAddress = $customer->getPrimaryAddress($attributeCode);
+                    if ($customerAddress !== false) {
+                        $addressData = $this->_getAddressValues($customerAddress);
+                        if (!empty($addressData[$fieldName])) {
+                            $value = $addressData[$fieldName];
                         }
-                        $value = date($format, strtotime($value));
-                    } elseif ($map['isAddress']) {
-                        $customerAddress = $customer->getPrimaryAddress($map['customer_field']);
-                        $value = [];
-                        if ($customerAddress !== false) {
-                            $value = $this->_getAddressValues($customerAddress);
-                        }
-                    } elseif (count($map['options'])) {
-                        foreach ($map['options'] as $option) {
-                            if ($option['value'] == $value) {
-                                $value = $option['label'];
-                                break;
+                    }
+                }
+                else {
+                    $value = $customer->getData($map['customer_field']);
+                    if ($value) {
+                        if ($map['isDate']) {
+                            $format = $this->getDateFormat();
+                            if ($map['customer_field'] == 'dob') {
+                                $format = substr($format, 0, 3);
+                            }
+                            $value = date($format, strtotime($value));
+                        } elseif ($map['isAddress']) {
+                            $customerAddress = $customer->getPrimaryAddress($map['customer_field']);
+                            $value = [];
+                            if ($customerAddress !== false) {
+                                $value = $this->_getAddressValues($customerAddress);
+                            }
+                        } elseif (count($map['options'])) {
+                            foreach ($map['options'] as $option) {
+                                if ($option['value'] == $value) {
+                                    $value = $option['label'];
+                                    break;
+                                }
                             }
                         }
                     }
+                }
+
+                if (!empty($value)) {
                     $mergeVars[$map['mailchimp']] = $value;
                 }
             }
@@ -850,7 +908,7 @@ class Data extends \Magento\Framework\App\Helper\AbstractHelper
     }
     public function loadStores()
     {
-        
+
         $mcUserName = [];
         $connection = $this->_mailChimpStores->getResource()->getConnection();
         $tableName = $this->_mailChimpStores->getResource()->getMainTable();
